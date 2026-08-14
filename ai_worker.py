@@ -89,3 +89,4 @@ except KeyboardInterrupt:
 finally:
     neo4j_driver.close()
     consumer.close()
+    #dhhryjtjututjutjutjyhtjytyjtjtjytjutg
