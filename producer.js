@@ -1,11 +1,11 @@
-const { Kafka } = require('kafkajs');
+const { Kafka, Partitioners } = require('kafkajs');
 
 const kafka = new Kafka({
   clientId: 'aetheris-ingest-gateway',
   brokers: ['localhost:19092'],
 });
 
-const producer = kafka.producer();
+const producer = kafka.producer({ createPartitioner: Partitioners.LegacyPartitioner });
 
 async function run() {
   await producer.connect();

@@ -65,4 +65,4 @@ def register_target(image_path, target_name, threat_level):
 
 if __name__ == "__main__":
     # Register Target Bravo
-    register_target("target_bravo.jpg", "Target Bravo", "CRITICAL")
+    register_target("real_target.jpg", "REAL WORLD LEADER NAME", "CRITICAL")

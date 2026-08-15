@@ -1,4 +1,4 @@
-const { Kafka } = require('kafkajs');
+const { Kafka, Partitioners } = require('kafkajs');
 const Parser = require('rss-parser');
 
 const kafka = new Kafka({
@@ -6,7 +6,7 @@ const kafka = new Kafka({
   brokers: ['localhost:19092'],
 });
 
-const producer = kafka.producer();
+const producer = kafka.producer({ createPartitioner: Partitioners.LegacyPartitioner });
 const parser = new Parser();
 
 // Live Open-Source Intelligence Feeds

@@ -75,4 +75,4 @@ def scan_media(image_path, event_id="EVT-LIVE-01"):
             print(f"\n[-] Face {idx+1}: No matches found on HVT Watchlist.")
 
 if __name__ == "__main__":
-    scan_media("target_bravo.jpg", event_id="OSINT-TEST-BRAVO")
+    scan_media("real_target.jpg", event_id="OSINT-TEST-BRAVO")
