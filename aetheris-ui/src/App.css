@@ -1,0 +1,139 @@
+/* AETHERIS MK-IV C2 Dashboard Styles */
+
+/* Scanline animation overlay */
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 8px rgba(0, 255, 204, 0.2); }
+  50% { box-shadow: 0 0 20px rgba(0, 255, 204, 0.4); }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* HUD Header */
+.hud-header {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  z-index: 2000;
+  background: rgba(10, 12, 16, 0.92);
+  padding: 15px 20px;
+  border: 1px solid #00ffcc;
+  animation: pulse-glow 3s ease-in-out infinite;
+  backdrop-filter: blur(8px);
+}
+
+.hud-header h1 {
+  margin: 0;
+  font-size: 1.2rem;
+  letter-spacing: 3px;
+  color: #00ffcc;
+  text-shadow: 0 0 10px rgba(0, 255, 204, 0.5);
+}
+
+.hud-header .subtitle {
+  margin: 5px 0 12px 0;
+  font-size: 0.7rem;
+  color: #556677;
+  letter-spacing: 1px;
+}
+
+/* View Toggle Buttons */
+.view-btn {
+  background: #1a2332;
+  color: #00ffcc;
+  border: 1px solid #1a2332;
+  padding: 7px 14px;
+  cursor: pointer;
+  font-family: 'Courier New', monospace;
+  font-weight: bold;
+  font-size: 0.75rem;
+  letter-spacing: 1px;
+  transition: all 0.2s ease;
+}
+
+.view-btn:hover {
+  background: #253344;
+  border-color: #00ffcc;
+}
+
+.view-btn.active {
+  background: #00ffcc;
+  color: #07080a;
+  border-color: #00ffcc;
+}
+
+/* Right Inspector Panel */
+.inspector-panel {
+  width: 350px;
+  background: rgba(12, 15, 20, 0.95);
+  border-left: 1px solid #1a2332;
+  padding: 20px;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.inspector-panel h3 {
+  margin: 0 0 15px 0;
+  color: #ff5500;
+  font-size: 0.9rem;
+  letter-spacing: 1px;
+}
+
+.inspector-card {
+  font-size: 0.8rem;
+  background: rgba(0, 0, 0, 0.4);
+  padding: 14px;
+  border: 1px solid #1a2332;
+  transition: border-color 0.3s;
+}
+
+.inspector-card:hover {
+  border-color: #00ffcc;
+}
+
+.inspector-card p {
+  margin: 6px 0;
+}
+
+.inspector-card .coord {
+  color: #ffee00;
+}
+
+.inspector-card .threat {
+  color: #ff0055;
+  animation: blink 2s ease-in-out infinite;
+}
+
+.inspector-placeholder {
+  font-size: 0.75rem;
+  color: #556677;
+  line-height: 1.6;
+}
+
+/* Status bar at bottom of inspector */
+.status-bar {
+  margin-top: auto;
+  padding-top: 15px;
+  border-top: 1px solid #1a2332;
+  font-size: 0.65rem;
+  color: #334455;
+}
+
+.status-bar .live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: #00ff66;
+  border-radius: 50%;
+  margin-right: 6px;
+  animation: blink 1.5s ease-in-out infinite;
+}

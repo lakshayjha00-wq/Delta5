@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------
+  # NEO4J: The Semantic Knowledge Graph (Ontology Core)
+  # ---------------------------------------------------------
+  neo4j:
+    image: neo4j:5.12.0
+    container_name: aetheris-neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474" # HTTP Browser UI
+      - "7687:7687" # Bolt Protocol (for Node.js / Python drivers)
+    environment:
+      - NEO4J_AUTH=neo4j/AetherisSecretPassword123
+      # APOC (Awesome Procedures on Cypher) plugin is required for complex graph mutations like merging nodes
+      - NEO4JLABS_PLUGINS=["apoc"]
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - aetheris-net
+
+  # ---------------------------------------------------------
+  # REDPANDA: The Event Streaming Bus (Kafka Alternative)
+  # ---------------------------------------------------------
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.10
+    container_name: aetheris-redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      # internal:9092 is for container-to-container traffic
+      # localhost:19092 is for your local machine to connect
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644" # Admin API
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    networks:
+      - aetheris-net
+
+  # ---------------------------------------------------------
+  # REDPANDA CONSOLE: Web UI for monitoring event streams
+  # ---------------------------------------------------------
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.3.1
+    container_name: aetheris-redpanda-console
+    restart: unless-stopped
+    entrypoint: /app/console
+    ports:
+      - "8080:8080" # Web UI
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+    depends_on:
+      - redpanda
+    networks:
+      - aetheris-net
+
+  # ---------------------------------------------------------
+  # QDRANT: The Vector Database (Facial & OSINT Embeddings)
+  # ---------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.7.0
+    container_name: aetheris-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333" # REST API & Web UI
+      - "6334:6334" # gRPC (for high-performance Python inference)
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - aetheris-net
+
+# ---------------------------------------------------------
+# NETWORKS & PERSISTENT VOLUMES
+# ---------------------------------------------------------
+networks:
+  aetheris-net:
+    driver: bridge
+
+volumes:
+  neo4j_data:
+  redpanda_data:
+  qdrant_data:
