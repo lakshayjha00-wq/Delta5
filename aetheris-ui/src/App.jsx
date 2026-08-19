@@ -109,7 +109,7 @@ function App() {
             return [...prev.slice(-49), data]; 
           });
         }
-      } catch (e) {
+      } catch {
         // Ignore non-JSON
       }
     };
