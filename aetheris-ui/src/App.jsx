@@ -1,7 +1,11 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import Globe from 'react-globe.gl';
 import neo4j from 'neo4j-driver';
+import countries, { generateConnections } from './countriesData';
+import { fetchFlights } from './flightTracker';
+import { ShipTracker } from './shipTracker';
+import { SatelliteTracker } from './satelliteTracker';
 import './App.css';
 
 const driver = neo4j.driver(
@@ -9,17 +13,42 @@ const driver = neo4j.driver(
   neo4j.auth.basic('neo4j', 'AetherisSecretPassword123')
 );
 
+// Helper: safely convert Neo4j Integer to JS number
+function toNumber(val) {
+  if (val == null) return null;
+  if (neo4j.isInt(val)) return val.toNumber();
+  if (typeof val === 'object' && val.low !== undefined) return neo4j.int(val.low).toNumber();
+  return Number(val);
+}
+
 function App() {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [geoLocations, setGeoLocations] = useState([]);
-  const [flightTracks, setFlightTracks] = useState([]);
+  const [flightTracks, setFlightTracks] = useState([]); // WebSocket flights (from backend)
+  
+  // Real-world trackers
+  const [liveFlights, setLiveFlights] = useState([]);
+  const [liveShips, setLiveShips] = useState([]);
+  const [liveSatellites, setLiveSatellites] = useState([]);
+
   const [viewMode, setViewMode] = useState('MAP');
-  const [showFlights, setShowFlights] = useState(true);
+  
+  // Toggles
   const [showGroundIntel, setShowGroundIntel] = useState(true);
+  const [showGlobalNet, setShowGlobalNet] = useState(true);
+  const [showLiveFlights, setShowLiveFlights] = useState(true);
+  const [showLiveShips, setShowLiveShips] = useState(true);
+  const [showLiveSats, setShowLiveSats] = useState(true);
+
   const [selectedNode, setSelectedNode] = useState(null);
+  const [nodeCount, setNodeCount] = useState(0);
+  const [linkCount, setLinkCount] = useState(0);
   
   const fgRef = useRef();
   const globeRef = useRef();
+
+  // Pre-compute the global network connections once
+  const globalConnections = useMemo(() => generateConnections(), []);
 
   // Responsive sizing for the WebGL Canvas (Full width minus the 350px sidebar)
   const [dimensions, setDimensions] = useState({ width: window.innerWidth - 350, height: window.innerHeight });
@@ -51,36 +80,44 @@ function App() {
           const rel = record.get('r');
 
           [source, target].forEach((node) => {
-            if (!nodes.has(node.identity.low)) {
+            const nodeId = toNumber(node.identity);
+            if (!nodes.has(nodeId)) {
               const props = node.properties;
+              const lat = toNumber(props.latitude);
+              const lng = toNumber(props.longitude);
+
               const nodeData = {
-                id: node.identity.low,
+                id: nodeId,
                 label: node.labels[0],
-                name: props.name || props.source_id || props.raw_text?.substring(0, 25) + '...',
+                name: props.name || props.source_id || (props.raw_text ? props.raw_text.substring(0, 30) + '...' : 'Unknown'),
                 threatLevel: props.threat_level || 'NORMAL',
-                latitude: props.latitude,
-                longitude: props.longitude,
+                latitude: lat,
+                longitude: lng,
                 fullProperties: props
               };
 
-              nodes.set(node.identity.low, nodeData);
+              nodes.set(nodeId, nodeData);
 
-              if (props.latitude && props.longitude) {
+              if (lat != null && lng != null && !isNaN(lat) && !isNaN(lng)) {
                 mapPins.push(nodeData);
               }
             }
           });
 
           links.push({
-            source: source.identity.low,
-            target: target.identity.low,
+            source: toNumber(source.identity),
+            target: toNumber(target.identity),
             label: rel.type,
           });
         });
 
         setGraphData({ nodes: Array.from(nodes.values()), links });
         setGeoLocations(mapPins);
+        setNodeCount(nodes.size);
+        setLinkCount(links.length);
 
+      } catch (err) {
+        console.error('[AETHERIS-UI] Graph fetch error:', err);
       } finally {
         await session.close();
       }
@@ -91,30 +128,62 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Subscribe to WebSocket for Real-time Flight Streams
+  // 1. Live Flights (OpenSky)
   useEffect(() => {
-    const ws = new WebSocket('ws://localhost:8080');
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.directive === "RADAR_CONTACT") {
-          setFlightTracks((prev) => {
-            const existingIndex = prev.findIndex(f => f.callsign === data.callsign);
-            if (existingIndex >= 0) {
-              const updated = [...prev];
-              updated[existingIndex] = data;
-              return updated;
-            }
-            return [...prev.slice(-49), data]; 
-          });
-        }
-      } catch (e) {
-        // Ignore non-JSON
-      }
+    const updateFlights = async () => {
+      const flights = await fetchFlights();
+      if (flights.length > 0) setLiveFlights(flights);
     };
+    updateFlights();
+    const interval = setInterval(updateFlights, 10000); // 10s
+    return () => clearInterval(interval);
+  }, []);
 
-    return () => ws.close();
+  // 2. Live Ships (AISStream)
+  useEffect(() => {
+    const tracker = new ShipTracker((ships) => {
+      setLiveShips([...ships]);
+    });
+    tracker.connect();
+    return () => tracker.disconnect();
+  }, []);
+
+  // 3. Live Satellites (CelesTrak + satellite.js)
+  useEffect(() => {
+    const tracker = new SatelliteTracker();
+    let interval;
+    tracker.fetchSatellites().then(() => {
+      interval = setInterval(() => {
+        setLiveSatellites(tracker.getPositions());
+      }, 1000); // 1s visual update
+    });
+    return () => { if (interval) clearInterval(interval); };
+  }, []);
+
+  // Subscribe to WebSocket for internal events (if running)
+  useEffect(() => {
+    let ws;
+    try {
+      ws = new WebSocket('ws://localhost:8081');
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.directive === "RADAR_CONTACT") {
+            setFlightTracks((prev) => {
+              const existingIndex = prev.findIndex(f => f.callsign === data.callsign);
+              if (existingIndex >= 0) {
+                const updated = [...prev];
+                updated[existingIndex] = data;
+                return updated;
+              }
+              return [...prev.slice(-49), data]; 
+            });
+          }
+        } catch (e) {}
+      };
+      ws.onerror = () => {};
+    } catch (e) {}
+    return () => { if (ws) ws.close(); };
   }, []);
 
   // Add slow cinematic rotation to the globe on load
@@ -125,9 +194,40 @@ function App() {
     }
   }, [viewMode]);
 
+  // --- 194 Country Network Overlay Data ---
+
+  const countryPoints = useMemo(() => {
+    if (!showGlobalNet) return [];
+    return countries.map(c => ({
+      lat: c.lat,
+      lng: c.lng,
+      name: c.name,
+      region: c.region,
+      size: 0.25,
+      color: regionColor(c.region),
+      type: 'COUNTRY_NODE',
+    }));
+  }, [showGlobalNet]);
+
+  const countryArcs = useMemo(() => {
+    if (!showGlobalNet) return [];
+    return globalConnections.map(conn => ({
+      startLat: conn.from[0],
+      startLng: conn.from[1],
+      endLat: conn.to[0],
+      endLng: conn.to[1],
+      color: conn.type === 'strategic'
+        ? ['rgba(0, 255, 204, 0.35)', 'rgba(0, 229, 255, 0.35)']
+        : ['rgba(0, 255, 204, 0.08)', 'rgba(0, 229, 255, 0.08)'],
+      stroke: conn.type === 'strategic' ? 0.6 : 0.2,
+      dashLength: conn.type === 'strategic' ? 0.4 : 0,
+      dashGap: conn.type === 'strategic' ? 0.2 : 0,
+      dashAnimateTime: conn.type === 'strategic' ? 4000 : 0,
+    }));
+  }, [showGlobalNet]);
+
   // --- WebGL Data Transformation ---
   
-  // Ground Intel -> Tactical Radar Pings
   const ringData = showGroundIntel ? geoLocations.map(pin => ({
     lat: pin.latitude,
     lng: pin.longitude,
@@ -139,19 +239,39 @@ function App() {
     ...pin
   })) : [];
 
-  // Airborne Targets -> Floating Orbit Labels
-  const flightLabels = showFlights ? flightTracks.map(flight => ({
-    lat: flight.coordinates.lat,
-    lng: flight.coordinates.lng,
-    alt: 0.08, // Float above the globe surface
+  const flightLabels = showLiveFlights ? liveFlights.map(flight => ({
+    lat: flight.lat,
+    lng: flight.lng,
+    alt: 0.06,
     text: `✈ ${flight.callsign}`,
-    color: '#00e5ff',
-    size: 1.2,
-    type: 'AIR_TARGET',
+    color: '#ff9900',
+    size: 0.8,
+    type: 'LIVE_FLIGHT',
     ...flight
   })) : [];
 
-  // Ground OSINT -> Surface Labels
+  const shipLabels = showLiveShips ? liveShips.map(ship => ({
+    lat: ship.lat,
+    lng: ship.lng,
+    alt: 0.01,
+    text: `🚢 ${ship.name}`,
+    color: '#00ff00',
+    size: 0.7,
+    type: 'LIVE_SHIP',
+    ...ship
+  })) : [];
+
+  const satLabels = showLiveSats ? liveSatellites.map(sat => ({
+    lat: sat.lat,
+    lng: sat.lng,
+    alt: sat.visualAlt, // computed from altitude Km
+    text: `🛰 ${sat.name}`,
+    color: '#ffffff',
+    size: 1.0,
+    type: 'LIVE_SATELLITE',
+    ...sat
+  })) : [];
+
   const groundLabels = showGroundIntel ? geoLocations.map(pin => ({
     lat: pin.latitude,
     lng: pin.longitude,
@@ -163,7 +283,18 @@ function App() {
     ...pin
   })) : [];
 
-  const allLabels = [...flightLabels, ...groundLabels];
+  const internalAirLabels = flightTracks.map(flight => ({
+    lat: flight.coordinates?.lat,
+    lng: flight.coordinates?.lng,
+    alt: 0.08,
+    text: `✈ ${flight.callsign} [INTERNAL]`,
+    color: '#00e5ff',
+    size: 1.2,
+    type: 'AIR_TARGET',
+    ...flight
+  }));
+
+  const allLabels = [...flightLabels, ...shipLabels, ...satLabels, ...groundLabels, ...internalAirLabels];
 
   // Graph Node Colors
   const getNodeColor = (node) => {
@@ -172,41 +303,52 @@ function App() {
       case 'IntelEvent': return '#ff5500';
       case 'Person': return '#00ffcc';
       case 'Location': return '#ffee00';
+      case 'Organization': return '#9900ff';
+      case 'IntelSource': return '#0088ff';
       default: return '#3b4252';
     }
   };
 
   return (
-    <div style={{ backgroundColor: '#07080a', height: '100vh', width: '100vw', margin: 0, padding: 0, fontFamily: 'monospace', color: '#00ffcc', display: 'flex', overflow: 'hidden' }}>
+    <div style={{ backgroundColor: '#07080a', height: '100vh', width: '100vw', margin: 0, padding: 0, fontFamily: "'Courier New', monospace", color: '#00ffcc', display: 'flex', overflow: 'hidden' }}>
       
       {/* Main Map Viewport */}
       <div style={{ flex: 1, position: 'relative', height: '100%' }}>
         
         {/* Command Controls Overhead */}
-        <div style={{ position: 'absolute', top: 20, left: 20, zIndex: 2000, backgroundColor: 'rgba(10,12,16,0.9)', padding: '15px', border: '1px solid #00ffcc', boxShadow: '0 0 15px rgba(0,255,204,0.2)' }}>
-          <h1 style={{ margin: 0, fontSize: '1.2rem', letterSpacing: '2px', color: '#00ffcc' }}>AETHERIS MK-IV C2</h1>
-          <p style={{ margin: '3px 0 10px 0', fontSize: '0.75rem', color: '#8a99ad' }}>TACTICAL AIR & GROUND MATRIX</p>
+        <div className="hud-header">
+          <h1>AETHERIS MK-IV C2</h1>
+          <p className="subtitle">TACTICAL AIR & GROUND MATRIX</p>
           
           <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
             <button 
               onClick={() => setViewMode('GRAPH')} 
-              style={{ backgroundColor: viewMode === 'GRAPH' ? '#00ffcc' : '#1a2332', color: viewMode === 'GRAPH' ? '#000' : '#00ffcc', border: 'none', padding: '5px 10px', cursor: 'pointer', fontFamily: 'monospace', fontWeight: 'bold' }}>
-              NETWORK GRAPH
+              className={`view-btn ${viewMode === 'GRAPH' ? 'active' : ''}`}>
+              ◈ NETWORK GRAPH
             </button>
             <button 
               onClick={() => setViewMode('MAP')} 
-              style={{ backgroundColor: viewMode === 'MAP' ? '#00ffcc' : '#1a2332', color: viewMode === 'MAP' ? '#000' : '#00ffcc', border: 'none', padding: '5px 10px', cursor: 'pointer', fontFamily: 'monospace', fontWeight: 'bold' }}>
-              3D ORBITAL GLOBE
+              className={`view-btn ${viewMode === 'MAP' ? 'active' : ''}`}>
+              ◉ 3D ORBITAL GLOBE
             </button>
           </div>
 
           {viewMode === 'MAP' && (
-            <div style={{ display: 'flex', gap: '15px', fontSize: '0.75rem', borderTop: '1px solid #1a2332', paddingTop: '8px' }}>
-              <label style={{ cursor: 'pointer', color: '#00ffcc' }}>
+            <div style={{ display: 'flex', gap: '15px', fontSize: '0.7rem', borderTop: '1px solid #1a2332', paddingTop: '8px', flexWrap: 'wrap' }}>
+              <label style={{ cursor: 'pointer', color: '#00ffcc', display: 'flex', alignItems: 'center', gap: '4px' }}>
                 <input type="checkbox" checked={showGroundIntel} onChange={(e) => setShowGroundIntel(e.target.checked)} /> Ground Intel ({geoLocations.length})
               </label>
-              <label style={{ cursor: 'pointer', color: '#00e5ff' }}>
-                <input type="checkbox" checked={showFlights} onChange={(e) => setShowFlights(e.target.checked)} /> Air Tracks ({flightTracks.length})
+              <label style={{ cursor: 'pointer', color: '#00ffcc', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <input type="checkbox" checked={showGlobalNet} onChange={(e) => setShowGlobalNet(e.target.checked)} /> Global Net (194)
+              </label>
+              <label style={{ cursor: 'pointer', color: '#ff9900', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <input type="checkbox" checked={showLiveFlights} onChange={(e) => setShowLiveFlights(e.target.checked)} /> Flights ({liveFlights.length})
+              </label>
+              <label style={{ cursor: 'pointer', color: '#00ff00', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <input type="checkbox" checked={showLiveShips} onChange={(e) => setShowLiveShips(e.target.checked)} /> Ships ({liveShips.length})
+              </label>
+              <label style={{ cursor: 'pointer', color: '#ffffff', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <input type="checkbox" checked={showLiveSats} onChange={(e) => setShowLiveSats(e.target.checked)} /> Sats ({liveSatellites.length})
               </label>
             </div>
           )}
@@ -223,8 +365,29 @@ function App() {
             nodeColor={getNodeColor}
             nodeVal={(n) => (n.threatLevel === 'HIGH' || n.threatLevel === 'CRITICAL' ? 12 : 5)}
             linkColor={() => 'rgba(0, 255, 204, 0.15)'}
+            linkDirectionalArrowLength={4}
+            linkDirectionalArrowColor={() => 'rgba(0, 255, 204, 0.3)'}
             backgroundColor="#07080a"
             onNodeClick={(node) => setSelectedNode(node)}
+            nodeCanvasObject={(node, ctx, globalScale) => {
+              const size = (node.threatLevel === 'HIGH' || node.threatLevel === 'CRITICAL') ? 6 : 4;
+              const color = getNodeColor(node);
+              ctx.beginPath();
+              ctx.arc(node.x, node.y, size + 2, 0, 2 * Math.PI);
+              ctx.fillStyle = color + '33';
+              ctx.fill();
+              ctx.beginPath();
+              ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
+              ctx.fillStyle = color;
+              ctx.fill();
+              const label = node.name || '';
+              const fontSize = 10 / globalScale;
+              ctx.font = `${fontSize}px Courier New`;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillStyle = '#8a99ad';
+              ctx.fillText(label.substring(0, 20), node.x, node.y + size + fontSize);
+            }}
           />
         ) : (
           <Globe
@@ -252,45 +415,169 @@ function App() {
             labelColor={d => d.color}
             labelResolution={2}
             onLabelClick={(label) => setSelectedNode(label)}
+
+            // === 194 COUNTRY NETWORK OVERLAY ===
+            // Country dots
+            pointsData={countryPoints}
+            pointLat={d => d.lat}
+            pointLng={d => d.lng}
+            pointColor={d => d.color}
+            pointAltitude={0.005}
+            pointRadius={d => d.size}
+            pointsMerge={true}
+            onPointClick={(point) => setSelectedNode(point)}
+
+            // Country connection arcs
+            arcsData={countryArcs}
+            arcStartLat={d => d.startLat}
+            arcStartLng={d => d.startLng}
+            arcEndLat={d => d.endLat}
+            arcEndLng={d => d.endLng}
+            arcColor={d => d.color}
+            arcAltitudeAutoScale={0.3}
+            arcStroke={d => d.stroke}
+            arcDashLength={d => d.dashLength}
+            arcDashGap={d => d.dashGap}
+            arcDashAnimateTime={d => d.dashAnimateTime}
           />
         )}
       </div>
 
       {/* Right Telemetry Sidebar */}
-      <div style={{ width: '350px', backgroundColor: 'rgba(12,15,20,0.95)', borderLeft: '1px solid #1a2332', padding: '20px', zIndex: 2000, display: 'flex', flexDirection: 'column' }}>
-        <h3 style={{ margin: '0 0 15px 0', color: '#ff5500', fontSize: '0.9rem', letterSpacing: '1px' }}>// RADAR & TARGET INSPECTOR</h3>
+      <div className="inspector-panel">
+        <h3>// RADAR & TARGET INSPECTOR</h3>
         
         {selectedNode ? (
-          <div style={{ fontSize: '0.8rem', backgroundColor: 'rgba(0,0,0,0.4)', padding: '12px', border: '1px solid #1a2332' }}>
+          <div className="inspector-card">
             {selectedNode.type === 'AIR_TARGET' ? (
               <>
-                <p style={{ margin: '4px 0', color: '#00e5ff' }}><strong>TYPE:</strong> AIRBORNE TARGET</p>
-                <p style={{ margin: '4px 0' }}><strong>CALLSIGN:</strong> {selectedNode.callsign}</p>
-                <p style={{ margin: '4px 0' }}><strong>ORIGIN:</strong> {selectedNode.origin_country}</p>
-                <p style={{ margin: '4px 0' }}><strong>ALTITUDE:</strong> {selectedNode.altitude} m</p>
-                <p style={{ margin: '4px 0' }}><strong>VELOCITY:</strong> {selectedNode.velocity} m/s</p>
-                <p style={{ margin: '4px 0', color: '#ffee00' }}><strong>LAT/LNG:</strong> {selectedNode.coordinates.lat.toFixed(4)}, {selectedNode.coordinates.lng.toFixed(4)}</p>
+                <p style={{ color: '#00e5ff' }}><strong>TYPE:</strong> AIRBORNE TARGET</p>
+                <p><strong>CALLSIGN:</strong> {selectedNode.callsign}</p>
+                <p><strong>ORIGIN:</strong> {selectedNode.origin_country}</p>
+                <p><strong>ALTITUDE:</strong> {selectedNode.altitude} m</p>
+                <p><strong>VELOCITY:</strong> {selectedNode.velocity} m/s</p>
+                {selectedNode.coordinates && (
+                  <p className="coord"><strong>LAT/LNG:</strong> {selectedNode.coordinates.lat?.toFixed(4)}, {selectedNode.coordinates.lng?.toFixed(4)}</p>
+                )}
+              </>
+            ) : selectedNode.type === 'LIVE_FLIGHT' ? (
+              <>
+                <p style={{ color: '#ff9900' }}><strong>TYPE:</strong> LIVE FLIGHT</p>
+                <p><strong>CALLSIGN:</strong> {selectedNode.callsign}</p>
+                <p><strong>ORIGIN:</strong> {selectedNode.origin_country}</p>
+                <p><strong>ALTITUDE:</strong> {selectedNode.altitude} m</p>
+                <p><strong>VELOCITY:</strong> {selectedNode.velocity} m/s</p>
+                <p className="coord"><strong>LAT/LNG:</strong> {selectedNode.lat?.toFixed(4)}, {selectedNode.lng?.toFixed(4)}</p>
+              </>
+            ) : selectedNode.type === 'LIVE_SHIP' ? (
+              <>
+                <p style={{ color: '#00ff00' }}><strong>TYPE:</strong> LIVE VESSEL</p>
+                <p><strong>NAME/MMSI:</strong> {selectedNode.name}</p>
+                <p><strong>SPEED:</strong> {selectedNode.speed} knots</p>
+                <p><strong>HEADING:</strong> {selectedNode.heading}°</p>
+                <p className="coord"><strong>LAT/LNG:</strong> {selectedNode.lat?.toFixed(4)}, {selectedNode.lng?.toFixed(4)}</p>
+              </>
+            ) : selectedNode.type === 'LIVE_SATELLITE' ? (
+              <>
+                <p style={{ color: '#ffffff' }}><strong>TYPE:</strong> ACTIVE SATELLITE</p>
+                <p><strong>NAME:</strong> {selectedNode.name}</p>
+                <p><strong>ALTITUDE:</strong> {selectedNode.altitudeKm?.toFixed(1)} km</p>
+                <p className="coord"><strong>LAT/LNG:</strong> {selectedNode.lat?.toFixed(4)}, {selectedNode.lng?.toFixed(4)}</p>
+              </>
+            ) : selectedNode.type === 'COUNTRY_NODE' ? (
+              <>
+                <p style={{ color: regionColor(selectedNode.region) }}><strong>TYPE:</strong> GLOBAL NETWORK NODE</p>
+                <p><strong>COUNTRY:</strong> {selectedNode.name}</p>
+                <p><strong>REGION:</strong> {regionLabel(selectedNode.region)}</p>
+                <p className="coord"><strong>LAT/LNG:</strong> {selectedNode.lat?.toFixed(4)}, {selectedNode.lng?.toFixed(4)}</p>
               </>
             ) : (
               <>
-                <p style={{ margin: '4px 0' }}><strong>Identifier:</strong> {selectedNode.name}</p>
-                <p style={{ margin: '4px 0' }}><strong>Type:</strong> {selectedNode.label}</p>
-                {selectedNode.latitude && (
-                  <p style={{ margin: '4px 0', color: '#ffee00' }}><strong>Coordinates:</strong> {selectedNode.latitude.toFixed(4)}, {selectedNode.longitude.toFixed(4)}</p>
+                <p><strong>Identifier:</strong> {selectedNode.name}</p>
+                <p><strong>Type:</strong> {selectedNode.label}</p>
+                {selectedNode.latitude != null && (
+                  <p className="coord"><strong>Coordinates:</strong> {Number(selectedNode.latitude).toFixed(4)}, {Number(selectedNode.longitude).toFixed(4)}</p>
                 )}
                 {selectedNode.threatLevel && selectedNode.threatLevel !== 'NORMAL' && (
-                  <p style={{ margin: '4px 0', color: '#ff0055' }}><strong>Threat Level:</strong> {selectedNode.threatLevel}</p>
+                  <p className="threat"><strong>⚠ Threat Level:</strong> {selectedNode.threatLevel}</p>
                 )}
               </>
             )}
           </div>
         ) : (
-          <p style={{ fontSize: '0.75rem', color: '#556677' }}>Click any 3D marker or airborne target to inspect telemetry.</p>
+          <p className="inspector-placeholder">Click any 3D marker, country node, ship, satellite or airborne target to inspect telemetry.</p>
         )}
+
+        {/* Legend */}
+        <div style={{ marginTop: '20px', fontSize: '0.65rem', color: '#556677' }}>
+          <p style={{ marginBottom: '8px', color: '#8a99ad', fontSize: '0.75rem' }}>// LEGEND</p>
+          {[
+            { color: '#ff9900', label: 'Live Flights (OpenSky)' },
+            { color: '#00ff00', label: 'Live Ships (AISStream)' },
+            { color: '#ffffff', label: 'Active Satellites (CelesTrak)' },
+            { color: '#ff5500', label: 'IntelEvent' },
+            { color: '#00ffcc', label: 'Person / Node' },
+            { color: '#ffee00', label: 'Location' },
+            { color: '#9900ff', label: 'Organization' },
+            { color: '#ff0055', label: 'CRITICAL Threat' },
+          ].map(item => (
+            <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '3px' }}>
+              <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: item.color, flexShrink: 0 }}></span>
+              <span>{item.label}</span>
+            </div>
+          ))}
+          <div style={{ marginTop: '8px', borderTop: '1px solid #1a2332', paddingTop: '6px' }}>
+            <p style={{ marginBottom: '4px', color: '#8a99ad' }}>// GLOBAL NET</p>
+            {[
+              { color: '#00ffcc', label: 'Africa' },
+              { color: '#00e5ff', label: 'Asia' },
+              { color: '#9966ff', label: 'Europe' },
+              { color: '#ff6600', label: 'North America' },
+              { color: '#ffcc00', label: 'South America' },
+              { color: '#ff3399', label: 'Oceania' },
+            ].map(item => (
+              <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '3px' }}>
+                <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: item.color, flexShrink: 0 }}></span>
+                <span>{item.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Status Bar */}
+        <div className="status-bar">
+          <span className="live-dot"></span>
+          LIVE | {nodeCount} NODES | {linkCount} LINKS | REFRESH 5s
+        </div>
       </div>
 
     </div>
   );
+}
+
+// Region color map
+function regionColor(region) {
+  switch (region) {
+    case 'AF': return '#00ffcc';
+    case 'AS': return '#00e5ff';
+    case 'EU': return '#9966ff';
+    case 'NA': return '#ff6600';
+    case 'SA': return '#ffcc00';
+    case 'OC': return '#ff3399';
+    default: return '#3b4252';
+  }
+}
+
+function regionLabel(region) {
+  switch (region) {
+    case 'AF': return 'AFRICA';
+    case 'AS': return 'ASIA';
+    case 'EU': return 'EUROPE';
+    case 'NA': return 'NORTH America';
+    case 'SA': return 'SOUTH America';
+    case 'OC': return 'OCEANIA';
+    default: return 'UNKNOWN';
+  }
 }
 
 export default App;
