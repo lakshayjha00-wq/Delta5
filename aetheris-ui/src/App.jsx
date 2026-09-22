@@ -1,11 +1,14 @@
 import { useEffect, useState, useRef, useMemo } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import Globe from 'react-globe.gl';
+import * as THREE from 'three';
 import neo4j from 'neo4j-driver';
 import countries, { generateConnections } from './countriesData';
 import { fetchFlights } from './flightTracker';
 import { ShipTracker } from './shipTracker';
 import { SatelliteTracker } from './satelliteTracker';
+import { fetchTrainStations } from './trainTracker';
+import { fetchTrafficData } from './trafficTracker';
 import './App.css';
 
 const driver = neo4j.driver(
@@ -30,6 +33,8 @@ function App() {
   const [liveFlights, setLiveFlights] = useState([]);
   const [liveShips, setLiveShips] = useState([]);
   const [liveSatellites, setLiveSatellites] = useState([]);
+  const [liveTrains, setLiveTrains] = useState([]);
+  const [liveTraffic, setLiveTraffic] = useState([]);
 
   const [viewMode, setViewMode] = useState('MAP');
   
@@ -39,6 +44,8 @@ function App() {
   const [showLiveFlights, setShowLiveFlights] = useState(true);
   const [showLiveShips, setShowLiveShips] = useState(true);
   const [showLiveSats, setShowLiveSats] = useState(true);
+  const [showLiveTrains, setShowLiveTrains] = useState(true);
+  const [showLiveTraffic, setShowLiveTraffic] = useState(true);
 
   const [selectedNode, setSelectedNode] = useState(null);
   const [nodeCount, setNodeCount] = useState(0);
@@ -49,6 +56,23 @@ function App() {
 
   // Pre-compute the global network connections once
   const globalConnections = useMemo(() => generateConnections(), []);
+  const [correlationEvent, setCorrelationEvent] = useState(null);
+
+  useEffect(() => {
+    const fetchCorrelation = async () => {
+      try {
+        const response = await fetch('http://localhost:3001/api/event-correlation');
+        const data = await response.json();
+        if (data && data.event) setCorrelationEvent(data);
+      } catch (error) {
+        console.warn('[AETHERIS-UI] Correlation API unavailable:', error);
+      }
+    };
+
+    fetchCorrelation();
+    const correlationInterval = setInterval(fetchCorrelation, 15000);
+    return () => clearInterval(correlationInterval);
+  }, []);
 
   // Responsive sizing for the WebGL Canvas (Full width minus the 350px sidebar)
   const [dimensions, setDimensions] = useState({ width: window.innerWidth - 350, height: window.innerHeight });
@@ -148,16 +172,34 @@ function App() {
     return () => tracker.disconnect();
   }, []);
 
-  // 3. Live Satellites (CelesTrak + satellite.js)
+  // 3. Live Satellites (real-world ISS / orbital source)
   useEffect(() => {
     const tracker = new SatelliteTracker();
     let interval;
     tracker.fetchSatellites().then(() => {
-      interval = setInterval(() => {
+      setLiveSatellites(tracker.getPositions());
+      interval = setInterval(async () => {
+        await tracker.fetchSatellites();
         setLiveSatellites(tracker.getPositions());
-      }, 1000); // 1s visual update
+      }, 5000);
     });
     return () => { if (interval) clearInterval(interval); };
+  }, []);
+
+  // 4. Open-source train stations and transport corridors
+  useEffect(() => {
+    const refreshTransport = async () => {
+      const [trains, traffic] = await Promise.all([
+        fetchTrainStations(),
+        fetchTrafficData(),
+      ]);
+      setLiveTrains(trains);
+      setLiveTraffic(traffic);
+    };
+
+    refreshTransport();
+    const interval = setInterval(refreshTransport, 180000);
+    return () => clearInterval(interval);
   }, []);
 
   // Subscribe to WebSocket for internal events (if running)
@@ -264,12 +306,34 @@ function App() {
   const satLabels = showLiveSats ? liveSatellites.map(sat => ({
     lat: sat.lat,
     lng: sat.lng,
-    alt: sat.visualAlt, // computed from altitude Km
+    alt: sat.visualAlt,
     text: `🛰 ${sat.name}`,
     color: '#ffffff',
     size: 1.0,
     type: 'LIVE_SATELLITE',
     ...sat
+  })) : [];
+
+  const trainLabels = showLiveTrains ? liveTrains.map(train => ({
+    lat: train.lat,
+    lng: train.lng,
+    alt: 0.015,
+    text: `🚆 ${train.name}`,
+    color: '#ffb703',
+    size: 0.7,
+    type: 'LIVE_TRAIN',
+    ...train
+  })) : [];
+
+  const trafficLabels = showLiveTraffic ? liveTraffic.map(point => ({
+    lat: point.lat,
+    lng: point.lng,
+    alt: 0.01,
+    text: `🚦 ${point.kind}`,
+    color: '#ff5ea8',
+    size: 0.6,
+    type: 'LIVE_TRAFFIC',
+    ...point
   })) : [];
 
   const groundLabels = showGroundIntel ? geoLocations.map(pin => ({
@@ -294,7 +358,7 @@ function App() {
     ...flight
   }));
 
-  const allLabels = [...flightLabels, ...shipLabels, ...satLabels, ...groundLabels, ...internalAirLabels];
+  const allLabels = [...flightLabels, ...shipLabels, ...satLabels, ...trainLabels, ...trafficLabels, ...groundLabels, ...internalAirLabels];
 
   // Graph Node Colors
   const getNodeColor = (node) => {
@@ -350,6 +414,12 @@ function App() {
               <label style={{ cursor: 'pointer', color: '#ffffff', display: 'flex', alignItems: 'center', gap: '4px' }}>
                 <input type="checkbox" checked={showLiveSats} onChange={(e) => setShowLiveSats(e.target.checked)} /> Sats ({liveSatellites.length})
               </label>
+              <label style={{ cursor: 'pointer', color: '#ffb703', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <input type="checkbox" checked={showLiveTrains} onChange={(e) => setShowLiveTrains(e.target.checked)} /> Trains ({liveTrains.length})
+              </label>
+              <label style={{ cursor: 'pointer', color: '#ff5ea8', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <input type="checkbox" checked={showLiveTraffic} onChange={(e) => setShowLiveTraffic(e.target.checked)} /> Traffic ({liveTraffic.length})
+              </label>
             </div>
           )}
         </div>
@@ -394,8 +464,12 @@ function App() {
             ref={globeRef}
             width={dimensions.width}
             height={dimensions.height}
-            globeImageUrl="//unpkg.com/three-globe/example/img/earth-dark.jpg"
-            backgroundColor="#07080a"
+            backgroundColor="#020612"
+            globeImageUrl="https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg"
+            bumpImageUrl="https://unpkg.com/three-globe/example/img/earth-topology.png"
+            showAtmosphere={true}
+            atmosphereColor="#7ec8ff"
+            atmosphereAltitude={0.18}
             
             // Ground Intel Radar Pings
             ringsData={ringData}
@@ -439,6 +513,15 @@ function App() {
             arcDashLength={d => d.dashLength}
             arcDashGap={d => d.dashGap}
             arcDashAnimateTime={d => d.dashAnimateTime}
+            onGlobeReady={() => {
+              if (globeRef.current) {
+                const controls = globeRef.current.controls();
+                controls.autoRotate = true;
+                controls.autoRotateSpeed = 0.5;
+                controls.enableDamping = true;
+                controls.dampingFactor = 0.08;
+              }
+            }}
           />
         )}
       </div>
@@ -484,6 +567,20 @@ function App() {
                 <p><strong>ALTITUDE:</strong> {selectedNode.altitudeKm?.toFixed(1)} km</p>
                 <p className="coord"><strong>LAT/LNG:</strong> {selectedNode.lat?.toFixed(4)}, {selectedNode.lng?.toFixed(4)}</p>
               </>
+            ) : selectedNode.type === 'LIVE_TRAIN' ? (
+              <>
+                <p style={{ color: '#ffb703' }}><strong>TYPE:</strong> LIVE TRAIN STATION</p>
+                <p><strong>NAME:</strong> {selectedNode.name}</p>
+                <p><strong>REGION:</strong> {selectedNode.region}</p>
+                <p className="coord"><strong>LAT/LNG:</strong> {selectedNode.lat?.toFixed(4)}, {selectedNode.lng?.toFixed(4)}</p>
+              </>
+            ) : selectedNode.type === 'LIVE_TRAFFIC' ? (
+              <>
+                <p style={{ color: '#ff5ea8' }}><strong>TYPE:</strong> PUBLIC TRAFFIC NETWORK</p>
+                <p><strong>ROUTE:</strong> {selectedNode.name}</p>
+                <p><strong>KIND:</strong> {selectedNode.kind}</p>
+                <p className="coord"><strong>LAT/LNG:</strong> {selectedNode.lat?.toFixed(4)}, {selectedNode.lng?.toFixed(4)}</p>
+              </>
             ) : selectedNode.type === 'COUNTRY_NODE' ? (
               <>
                 <p style={{ color: regionColor(selectedNode.region) }}><strong>TYPE:</strong> GLOBAL NETWORK NODE</p>
@@ -508,13 +605,49 @@ function App() {
           <p className="inspector-placeholder">Click any 3D marker, country node, ship, satellite or airborne target to inspect telemetry.</p>
         )}
 
+        {correlationEvent && (
+          <div style={{ marginTop: '18px', padding: '12px', border: '1px solid rgba(0,255,204,0.35)', background: 'rgba(7,13,18,0.92)', borderRadius: '10px' }}>
+            <p style={{ margin: '0 0 8px 0', color: '#00ffcc', fontSize: '0.75rem' }}>// EVENT CORRELATION MATRIX</p>
+            <p style={{ margin: '0 0 6px 0', color: '#e6f7ff', fontWeight: 700 }}>{correlationEvent.event}</p>
+            <p style={{ margin: '0 0 8px 0', color: '#8a99ad' }}>{correlationEvent.location}</p>
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '10px' }}>
+              <span style={{ background: 'rgba(0,255,204,0.12)', color: '#00ffcc', border: '1px solid rgba(0,255,204,0.3)', borderRadius: '999px', padding: '4px 8px', fontSize: '0.62rem' }}>
+                Probability {(correlationEvent.probability * 100).toFixed(0)}%
+              </span>
+              <span style={{ background: 'rgba(255,0,85,0.12)', color: '#ff5c8a', border: '1px solid rgba(255,0,85,0.25)', borderRadius: '999px', padding: '4px 8px', fontSize: '0.62rem' }}>
+                Risk {correlationEvent.riskScore}
+              </span>
+            </div>
+
+            <div style={{ marginBottom: '10px' }}>
+              <p style={{ margin: '0 0 6px 0', color: '#8a99ad', fontSize: '0.62rem' }}>SOURCES</p>
+              {correlationEvent.sources.map((source) => (
+                <div key={`${source.pipeline}-${source.source}`} style={{ marginBottom: '6px', fontSize: '0.62rem', color: '#dfeaf7' }}>
+                  <strong style={{ color: '#00e5ff' }}>{source.pipeline}:</strong> {source.source} — {source.signal}
+                </div>
+              ))}
+            </div>
+
+            <div>
+              <p style={{ margin: '0 0 6px 0', color: '#8a99ad', fontSize: '0.62rem' }}>OUTCOMES</p>
+              {correlationEvent.outcomes.map((outcome) => (
+                <div key={outcome.label} style={{ marginBottom: '6px', fontSize: '0.62rem', color: '#dfeaf7' }}>
+                  <strong style={{ color: '#ffcc66' }}>{outcome.label}</strong> {(outcome.probability * 100).toFixed(0)}% — {outcome.consequence}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Legend */}
         <div style={{ marginTop: '20px', fontSize: '0.65rem', color: '#556677' }}>
           <p style={{ marginBottom: '8px', color: '#8a99ad', fontSize: '0.75rem' }}>// LEGEND</p>
           {[
             { color: '#ff9900', label: 'Live Flights (OpenSky)' },
             { color: '#00ff00', label: 'Live Ships (AISStream)' },
-            { color: '#ffffff', label: 'Active Satellites (CelesTrak)' },
+            { color: '#ffffff', label: 'Active Satellites (ISS / Open data)' },
+            { color: '#ffb703', label: 'Live Train Stations (OSM)' },
+            { color: '#ff5ea8', label: 'Traffic Corridors (OSM)' },
             { color: '#ff5500', label: 'IntelEvent' },
             { color: '#00ffcc', label: 'Person / Node' },
             { color: '#ffee00', label: 'Location' },
